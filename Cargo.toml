@@ -1,0 +1,11 @@
+[package]
+name = "wayex"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+chrono = { version = "0.4.38", features = ["serde"] }
+clap = { version = "4.5.21", features = ["derive"] }
+csv = "1.3.1"
+rust_decimal = { version = "1.36.0", features = ["serde-with-arbitrary-precision"] }
+serde = { version = "1.0.215", features = ["derive"] }
