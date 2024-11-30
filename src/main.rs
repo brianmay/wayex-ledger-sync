@@ -122,10 +122,10 @@ fn example(wayex_file: &Path, ledger_file: &Path) -> Result<(), Box<dyn Error>> 
             .find(|ledger| {
                 if let Some(ledger) = ledger {
                     let date = time.date_naive();
-                    let date_diff = ledger.date - date;
+                    let date_diff = date - ledger.date;
                     if ledger.amount != wayex_amount {
                         false
-                    } else if date_diff.num_days() < -14 || date_diff.num_days() > 14 {
+                    } else if date_diff.num_days() < 0 || date_diff.num_days() > 14 {
                         println!(
                             "{}          {:40} {:.8}",
                             ledger.date, ledger.description, ledger.amount
