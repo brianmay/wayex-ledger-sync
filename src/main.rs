@@ -7,6 +7,8 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::{error::Error, process};
 
+mod version;
+
 #[allow(dead_code)]
 #[derive(Debug, serde::Deserialize)]
 enum TransactionType {
@@ -19,11 +21,11 @@ enum TransactionType {
 #[derive(Debug, serde::Deserialize, Copy, Clone, Eq, PartialEq)]
 enum Currency {
     #[serde(rename = "BTC")]
-    BTC,
+    Btc,
     #[serde(rename = "XRP")]
-    XRP,
+    Xrp,
     #[serde(rename = "BCH")]
-    BCH,
+    Bch,
 }
 
 #[allow(dead_code)]
@@ -82,7 +84,7 @@ fn example(wayex_file: &Path, ledger_file: &Path) -> Result<(), Box<dyn Error>> 
         let results: Result<Vec<WayexRecord>, _> = rdr.deserialize().collect();
         results?
             .into_iter()
-            .filter(|x| x.crypto == Currency::BTC)
+            .filter(|x| x.crypto == Currency::Btc)
             .rev()
             .collect()
     };
@@ -163,10 +165,23 @@ struct Args {
 
     #[arg(short, long)]
     ledger_file: PathBuf,
+
+    #[arg(short, long)]
+    version: bool,
 }
 
 fn main() {
     let args = Args::parse();
+
+    if args.version {
+        println!(
+            "wayex_ledger v{} ({} {})",
+            version::VERSION,
+            version::VCS_REF.unwrap_or("unknown"),
+            version::BUILD_DATE.unwrap_or("unknown"),
+        );
+        process::exit(0);
+    }
 
     if let Err(err) = example(&args.wayex_file, &args.ledger_file) {
         println!("error running example: {}", err);

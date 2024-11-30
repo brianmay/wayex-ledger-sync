@@ -758,7 +758,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e5047c5392700766601942795a436d7d2599af60dcc3cc1248c9120bfb0827b0"
 
 [[package]]
-name = "wayex"
+name = "wayex-ledger-sync"
 version = "0.1.0"
 dependencies = [
  "chrono",
