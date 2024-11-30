@@ -1,5 +1,7 @@
 use chrono::DateTime;
+use chrono::Local;
 use chrono::NaiveDate;
+use chrono::TimeZone;
 use chrono::Utc;
 use clap::Parser;
 use rust_decimal::Decimal;
@@ -89,76 +91,83 @@ fn example(wayex_file: &Path, ledger_file: &Path) -> Result<(), Box<dyn Error>> 
             .collect()
     };
 
-    // let mut total = Decimal::from_i128_with_scale(0, 8);
-    // for record in results {
-    //     // println!("{:?}", record);
-    //     let amount = record.get_amount();
-    //     total = total + amount;
-    //     println!(
-    //         "{} {:40} {:.8} {:.8}",
-    //         record.time, record.details, amount, total,
-    //     );
-    // }
-
-    let ledger_data = {
+    let mut ledger_data = {
         let mut rdr = csv::Reader::from_path(ledger_file)?;
-        let results: Result<Vec<LedgerRecord>, _> = rdr.deserialize().collect();
+        let results: Result<Vec<Option<LedgerRecord>>, _> =
+            rdr.deserialize().map(|x| x.map(Some)).collect();
         results?
     };
 
     let mut wayex_total = Decimal::from_i128_with_scale(0, 8);
-    let mut ledger_total = Decimal::from_i128_with_scale(0, 8);
 
-    for (wayex, ledger) in weyex_data.iter().zip(ledger_data.iter()) {
+    for wayex in &weyex_data {
         let wayex_amount = wayex.get_amount();
         wayex_total += wayex_amount;
 
-        let ledger_amount = ledger.amount;
-        ledger_total += ledger_amount;
+        let time = Local.from_utc_datetime(&wayex.time.naive_utc());
+        let time_str = time.format("%Y-%m-%d %H:%M:%S").to_string();
 
-        if wayex_amount != ledger_amount || wayex_total != ledger_total {
+        println!(
+            "{} {:40} {:.8} {:.8}",
+            time_str, wayex.details, wayex_amount, wayex_total,
+        );
+
+        if wayex_amount == Decimal::from_i128_with_scale(0, 8) {
             println!();
-            println!(
-                "{:24} {:40} {:.8} {:.8}",
-                wayex.time, wayex.details, wayex_amount, wayex_total,
-            );
-            println!(
-                "{:24} {:40} {:.8} {:.8}",
-                ledger.date, ledger.description, ledger_amount, ledger_total,
-            );
-            panic!("Amounts do not match");
-        } else {
-            println!(
-                "{:24} {:40} {:.8} {:.8}",
-                ledger.date, ledger.description, ledger_amount, ledger_total,
-            );
+            continue;
         }
 
-        // println!(
-        //     "{} {:40} {:.8} {:.8} {:.8} {:.8}",
-        //     wayex.time,
-        //     wayex.details,
-        //     wayex.get_amount(),
-        //     wayex_total,
-        //     ledger.amount,
-        //     ledger_total,
-        // );
+        let ledger = ledger_data
+            .iter_mut()
+            .find(|ledger| {
+                if let Some(ledger) = ledger {
+                    let date = time.date_naive();
+                    let date_diff = ledger.date - date;
+                    if ledger.amount != wayex_amount {
+                        false
+                    } else if date_diff.num_days() < -14 || date_diff.num_days() > 14 {
+                        println!(
+                            "{}          {:40} {:.8}",
+                            ledger.date, ledger.description, ledger.amount
+                        );
+                        println!("Date mismatch: {} {}", date_diff.num_days(), ledger.date);
+                        false
+                    } else {
+                        true
+                    }
+                } else {
+                    false
+                }
+            })
+            .map(|x| x.take());
+
+        if let Some(Some(ledger)) = ledger {
+            println!(
+                "{}          {:40} {:.8}",
+                ledger.date, ledger.description, ledger.amount
+            );
+        } else {
+            panic!("Could not find ledger record");
+        }
+
+        println!();
     }
-    // for record in ledger_data {
-    //     let amount = record.amount;
-    //     total += amount;
-    //     println!(
-    //         "{} {:40} {:.8} {:.8}",
-    //         record.date, record.description, amount, total,
-    //     );
-    // }
+
+    println!("Unaccounted ledger records:");
+
+    for ledger in ledger_data.iter().filter_map(|x| x.as_ref()) {
+        println!(
+            "{:24} {:40} {:.8}",
+            ledger.date, ledger.description, ledger.amount,
+        );
+    }
 
     Ok(())
 }
 
 /// Simple program to greet a person
 #[derive(Parser, Debug)]
-#[command(version, about, long_about = None)]
+#[command(version, about, long_about = "Synchronise Wayex and Legdger-CLI")]
 struct Args {
     #[arg(short, long)]
     wayex_file: PathBuf,
@@ -167,13 +176,13 @@ struct Args {
     ledger_file: PathBuf,
 
     #[arg(short, long)]
-    version: bool,
+    build_version: bool,
 }
 
 fn main() {
     let args = Args::parse();
 
-    if args.version {
+    if args.build_version {
         println!(
             "wayex_ledger v{} ({} {})",
             version::VERSION,
