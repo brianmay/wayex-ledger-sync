@@ -1,10 +1,13 @@
-use chrono::DateTime;
+use beancount_parser::parse;
+use beancount_parser::BeancountFile;
+use beancount_parser::DirectiveContent;
 use chrono::Local;
 use chrono::NaiveDate;
+use chrono::NaiveDateTime;
 use chrono::TimeZone;
-use chrono::Utc;
 use clap::Parser;
 use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
 use std::path::Path;
 use std::path::PathBuf;
 use std::{error::Error, process};
@@ -17,11 +20,22 @@ enum TransactionType {
     Received,
     Spent,
     Sent,
+    Sell,
+    #[serde(rename = "Bank Withdrawal (BSB)")]
+    BankWithdrawal,
+    #[serde(rename = "Card (Purchase)")]
+    CardPurchase,
+    #[serde(rename = "Card (Refund)")]
+    CardRefund,
+    #[serde(rename = "Crypto Deposit")]
+    CryptoDeposit,
 }
 
 #[allow(dead_code)]
 #[derive(Debug, serde::Deserialize, Copy, Clone, Eq, PartialEq)]
 enum Currency {
+    #[serde(rename = "AUD")]
+    Aud,
     #[serde(rename = "BTC")]
     Btc,
     #[serde(rename = "XRP")]
@@ -33,41 +47,42 @@ enum Currency {
 #[allow(dead_code)]
 #[derive(Debug, serde::Deserialize)]
 struct WayexRecord {
-    #[serde(rename = "Time")]
-    time: DateTime<Utc>,
-
-    #[serde(rename = "Crypto")]
-    crypto: Currency,
-
-    #[serde(rename = "Amount (AUD)")]
-    amount_aud: Decimal,
-
-    #[serde(rename = "Amount (Crypto)")]
-    amount_crypto: Decimal,
+    #[serde(rename = "Date/Time")]
+    time: String,
 
     #[serde(rename = "Type")]
     transaction_type: TransactionType,
 
-    #[serde(rename = "Transaction ID")]
-    transaction_id: String,
+    #[serde(rename = "Asset")]
+    crypto: Currency,
 
-    #[serde(rename = "Fees")]
-    fees: Decimal,
+    #[serde(rename = "Amount AUD")]
+    amount_aud: Option<Decimal>,
 
-    #[serde(rename = "Destination")]
-    destination: String,
+    #[serde(rename = "Amount Crypto")]
+    amount_crypto: Option<Decimal>,
 
-    #[serde(rename = "Details/TX Hash")]
+    #[serde(rename = "Details")]
     details: String,
+
+    #[serde(rename = "Reference")]
+    reference: String,
 }
 
 impl WayexRecord {
-    fn get_amount(&self) -> Decimal {
-        match self.transaction_type {
-            TransactionType::Received => self.amount_crypto,
-            TransactionType::Spent => -self.amount_crypto,
-            TransactionType::Sent => -self.amount_crypto,
-        }
+    fn get_amount(&self) -> Option<Decimal> {
+        let amount = self.amount_crypto?;
+        let amount = match self.transaction_type {
+            TransactionType::Received => amount,
+            TransactionType::CryptoDeposit => amount,
+            TransactionType::CardRefund => amount,
+            TransactionType::Spent => -amount,
+            TransactionType::BankWithdrawal => -amount,
+            TransactionType::CardPurchase => -amount,
+            TransactionType::Sell => -amount,
+            TransactionType::Sent => -amount,
+        };
+        Some(amount)
     }
 }
 
@@ -91,20 +106,75 @@ fn example(wayex_file: &Path, ledger_file: &Path) -> Result<(), Box<dyn Error>> 
             .collect()
     };
 
-    let mut ledger_data = {
-        let mut rdr = csv::Reader::from_path(ledger_file)?;
-        let results: Result<Vec<Option<LedgerRecord>>, _> =
-            rdr.deserialize().map(|x| x.map(Some)).collect();
-        results?
+    let mut ledger_data: Vec<Option<LedgerRecord>> = {
+        let unparsed_file = std::fs::read_to_string(ledger_file)?;
+        let ledger: BeancountFile<rust_decimal::Decimal> = parse(&unparsed_file)?;
+        // dbg!(ledger);
+
+        ledger
+            .directives
+            .into_iter()
+            .filter_map(|d| {
+                let DirectiveContent::Transaction(transaction) = d.content else {
+                    return None;
+                };
+
+                let Some(description) = transaction.narration else {
+                    panic!("No description");
+                };
+
+                let posting = transaction
+                    .postings
+                    .into_iter()
+                    .find(|p| p.account.as_str() == "Assets:Cash-On-Hand:CryptoSpend:BTC")?;
+
+                let Some(amount) = posting.amount else {
+                    panic!("No amount");
+                };
+
+                if amount.currency.as_str() != "BTC" {
+                    panic!("Invalid currency");
+                }
+
+                Some(Some(LedgerRecord {
+                    date: NaiveDate::from_ymd_opt(
+                        d.date.year.into(),
+                        d.date.month.into(),
+                        d.date.day.into(),
+                    )
+                    .unwrap(),
+                    description,
+                    amount: amount.value,
+                    currency: Currency::Btc,
+                }))
+            })
+            .collect()
     };
 
     let mut wayex_total = Decimal::from_i128_with_scale(0, 8);
 
-    for wayex in &weyex_data {
-        let wayex_amount = wayex.get_amount();
-        wayex_total += wayex_amount;
+    let mut spent = Decimal::from_i128_with_scale(0, 8);
+    let mut paid = Decimal::from_i128_with_scale(0, 8);
 
-        let time = Local.from_utc_datetime(&wayex.time.naive_utc());
+    for wayex in &weyex_data {
+        let Some(wayex_amount) = wayex.get_amount() else {
+            continue;
+        };
+        wayex_total += wayex_amount;
+        if wayex_amount > dec! { 0 } {
+            paid += wayex_amount;
+        }
+        if wayex_amount < dec! { 0 } {
+            spent += wayex_amount;
+        }
+
+        let maybe_time = NaiveDateTime::parse_from_str(&wayex.time, "%a, %d %b %Y, %I:%M %P");
+        let time = match maybe_time {
+            Ok(time) => time,
+            Err(err) => panic!("Cannot parse datetime {}: {err}", wayex.time),
+        };
+        let time = Local.from_local_datetime(&time).unwrap();
+        println!("{} {}", wayex.time, time);
         let time_str = time.format("%Y-%m-%d %H:%M:%S").to_string();
 
         println!(
@@ -125,7 +195,7 @@ fn example(wayex_file: &Path, ledger_file: &Path) -> Result<(), Box<dyn Error>> 
                     let date_diff = date - ledger.date;
                     if ledger.amount != wayex_amount {
                         false
-                    } else if date_diff.num_days() < 0 || date_diff.num_days() > 14 {
+                    } else if date_diff.num_days() < -2 || date_diff.num_days() > 14 {
                         println!(
                             "{}          {:40} {:.8}",
                             ledger.date, ledger.description, ledger.amount
@@ -162,6 +232,10 @@ fn example(wayex_file: &Path, ledger_file: &Path) -> Result<(), Box<dyn Error>> 
         );
     }
 
+    println!();
+    println!("spent {spent}");
+    println!("paid {paid}");
+    println!("total {wayex_total}");
     Ok(())
 }
 
